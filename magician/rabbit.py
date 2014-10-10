@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import json
+import logging
 import time
 
 from tornado import concurrent, gen
@@ -19,7 +20,8 @@ class RabbitConnection(object):
         self._future = None
         self._channels = []
         self._custom_io_loop = custom_ioloop
-        print('CONNECTION CREATED FOR', self.amqp_url)
+        self._logger = logging.getLogger('RabbitConnection')
+        self._logger.debug('connection created for %s', self.amqp_url)
 
     @gen.coroutine
     def connect(self):
@@ -34,11 +36,11 @@ class RabbitConnection(object):
         """
         self._future = concurrent.Future()
         if self._connection is None:
-            print('ISSUING CONNECTION TO', self.amqp_url)
+            self._logger.debug('connecting to %s', self.amqp_url)
 
             def on_connection_failure(*args):
-                print('CONNECTION FAILURE', args)
-                self._future.set_result(None)
+                self._logger.error('connection failure - %s', args)
+                self._future.set_exception(pika.exceptions.AMQPConnectionError)
 
             pika.adapters.TornadoConnection(
                 pika.URLParameters(self.amqp_url),
@@ -47,49 +49,61 @@ class RabbitConnection(object):
                 custom_ioloop=self._custom_io_loop,
             )
         else:
+            self._logger.debug('already connected, scanning channel cache')
             while self._channels:
                 channel = self._channels.pop()
                 if channel.is_open:
+                    self._logger.debug('returning cached channel %s (%d)',
+                                       channel, channel.channel_number)
                     raise gen.Return(channel)
 
-            print('GENERATING CHANNEL')
+            self._logger.debug('generating channel')
             self._connection.channel(
                 on_open_callback=self.handle_channel_opened)
 
-        print('WAITING ON CONNECTION')
+        self._logger.debug('waiting on connection')
         channel = yield gen.YieldFuture(self._future)
-        print('GOT CHANNEL', channel.channel_number if channel else channel)
+        self._logger.debug('received channel %s (%d)',
+                           channel, channel.channel_number)
         raise gen.Return(channel)
 
     def open_channel(self, connection):
-        print('CONNECTED:', connection, connection.__dict__)
+        self._logger.debug('connected to %s, asking for channel', connection)
         self._connection = connection
         connection.add_on_close_callback(self.handle_connection_closed)
         connection.channel(on_open_callback=self.handle_channel_opened)
 
     def handle_connection_closed(self, *args):
-        print('CONNECTION CLOSED:', args)
+        self._logger.info('connection closed - %s', args)
         self._connection = None
         self._channels = []
 
     def handle_channel_opened(self, channel):
-        print('CHANNEL OPENED:', channel, channel.__dict__)
+        self._logger.debug('channel opened: %s (%d)',
+                           channel, channel.channel_number)
         channel.add_on_close_callback(self.handle_channel_closed)
         self._future.set_result(channel)
         self._future = None
 
     def handle_channel_closed(self, dead_channel, *args):
-        print('CHANNEL', dead_channel.channel_number, 'CLOSED WITH', args)
+        self._logger.debug('channel %s (%d) closed - %s',
+                           dead_channel, dead_channel.channel_number, args)
         for index, channel in self._channels:
             if channel.channel_number == dead_channel.channel_number:
-                print('REMOVING CHANNEL', channel.channel_number)
+                self._logger.debug('removing channel %d from internal list',
+                                   channel.channel_number)
                 del self._channels[index]
                 break
 
     def return_channel(self, channel):
-        if channel is not None and channel.is_open:
-            print('CHANNEL', channel.channel_number, 'RETURNED')
-            self._channels.append(channel)
+        if channel is not None:
+            if channel.is_open:
+                self._logger.debug('channel %d returned',
+                                   channel.channel_number)
+                self._channels.append(channel)
+            else:
+                self._logger.debug('closed channel %d returned, discarding',
+                                   channel.channel_number)
 
 
 class PublisherMixin(object):
