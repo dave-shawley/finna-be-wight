@@ -1,0 +1,10 @@
+#!/bin/sh -e
+#
+
+test -n "$SHELLDEBUG" && set -x
+
+test -d build || mkdir build
+cat>build/test-environment<<EOF
+export DEBUG=1
+export ENVIRONMENT=development
+EOF
